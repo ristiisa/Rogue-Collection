@@ -12,210 +12,290 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-    - name: Install Qt
-      uses: jurplel/install-qt-action@v3
-      with:
-        version: '6.5.0'
-        arch: win64_msvc2019_64
-        modules: 'qtmultimedia'
+      - name: Install Qt 5.15.2 (Windows, MSVC2019 x64)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '5.15.2'
+          arch: win64_msvc2019_64
 
-    - name: Setup MSVC
-      uses: microsoft/setup-msbuild@v1.3
+      - name: Setup MSVC (v142 toolset, x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          toolset: 14.29
 
-    - name: Build project
-      run: |
-        cd src/RogueCollectionQml
-        qmake RogueCollection.pro
-        nmake release
-      shell: cmd
+      # Build Frontend.lib into the exact path the plugin expects
+      - name: Build Frontend.lib (auto-discover + MSVC makefiles)
+        shell: cmd
+        run: |
+          setlocal enabledelayedexpansion
+          set "OUT=%GITHUB_WORKSPACE%\bin\Win32\Release"
+          if not exist "%OUT%" mkdir "%OUT%"
 
-    - name: Create Windows artifact
-      run: |
-        mkdir artifacts/windows
-        copy src\RogueCollectionQml\release\RogueCollection.exe artifacts\windows\
-        # Copy Qt libraries
-        windeployqt artifacts/windows/RogueCollection.exe
-      shell: cmd
+          rem Find Frontend.pro (e.g. src\Frontend.pro)
+          set "FE_PRO="
+          for /r "%GITHUB_WORKSPACE%\src" %%F in (Frontend.pro) do (
+            set "FE_PRO=%%~fF"
+            goto :found
+          )
+          :found
 
-    - name: Upload Windows artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: rogue-collection-windows-x64
-        path: artifacts/windows/
+          if not defined FE_PRO (
+            echo Frontend.pro not found. Skipping Frontend.lib build.
+          ) else (
+            echo Found Frontend.pro: !FE_PRO!
+            set "FEDIR="
+            for %%F in ("!FE_PRO!") do set "FEDIR=%%~dpF"
+            pushd "!FEDIR!"
+            set QMAKESPEC=win32-msvc
+            qmake Frontend.pro CONFIG+=release "DESTDIR=%OUT%"
+            nmake /NOLOGO
+            popd
+            if not exist "%OUT%\Frontend.lib" (
+              for %%L in ("!FEDIR!\release\Frontend.lib" "!FEDIR!\Frontend.lib") do (
+                if exist "%%~fL" copy "%%~fL" "%OUT%\Frontend.lib" >NUL
+              )
+            )
+            dir "%OUT%"
+          )
+
+      - name: Build app (qmake+nmake, force MSVC spec)
+        shell: cmd
+        run: |
+          cd src\RogueCollectionQml
+          set QMAKESPEC=win32-msvc
+          qmake RogueCollection.pro CONFIG+=release
+          nmake /NOLOGO
+
+      - name: Create Windows artifact
+        shell: cmd
+        run: |
+          mkdir artifacts\windows
+          for %%F in (src\RogueCollectionQml\release\RogueCollection.exe src\RogueCollectionQml\RogueCollection.exe) do (
+            if exist "%%F" copy "%%F" artifacts\windows\RogueCollection.exe
+          )
+          windeployqt artifacts\windows\RogueCollection.exe
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rogue-collection-windows-x64
+          path: artifacts/windows/
 
   build-linux:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-    - name: Install Qt and dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y qt6-base-dev qt6-qml-dev qt6-multimedia-dev qmake6 build-essential
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libgl1-mesa-dev libpulse-dev libasound2-dev
 
-    - name: Build project
-      run: |
-        cd src/RogueCollectionQml
-        qmake6 RogueCollection.pro
-        make -j$(nproc)
+      # Use the action (do NOT call python -m aqt)
+      - name: Install Qt 5.15.2 (Linux, GCC x64)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '5.15.2'
+          arch: linux_gcc_64
+          archives: 'qtbase qtdeclarative qtmultimedia qttools'
 
-    - name: Create Linux artifact
-      run: |
-        mkdir -p artifacts/linux
-        cp src/RogueCollectionQml/rogue-collection artifacts/linux/
+      - name: Build Frontend static lib (auto-discover)
+        run: |
+          set -e
+          FE_PRO="$(git ls-files 'src/**/Frontend.pro' 'Frontend.pro' | head -n1 || true)"
+          if [ -z "$FE_PRO" ]; then
+            echo "Frontend.pro not found. Skipping lib build."
+          else
+            echo "Found Frontend.pro at: $FE_PRO"
+            mkdir -p build/release
+            ( cd "$(dirname "$FE_PRO")" \
+              && qmake Frontend.pro CONFIG+=release "DESTDIR=$GITHUB_WORKSPACE/build/release" "TARGET=shared-frontend" \
+              && make -j"$(nproc)" )
+            # Ensure the exact filename some pro files expect:
+            if [ -f build/release/libshared-frontend.a ] && [ ! -f build/release/lib-shared-frontend.a ]; then
+              cp -f build/release/libshared-frontend.a build/release/lib-shared-frontend.a
+            fi
+            ls -l build/release
+          fi
 
-    - name: Upload Linux artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: rogue-collection-linux-x64
-        path: artifacts/linux/
+      - name: Build app
+        run: |
+          cd src/RogueCollectionQml
+          qmake RogueCollection.pro CONFIG+=release
+          make -j"$(nproc)"
+
+      - name: Create Linux artifact
+        run: |
+          mkdir -p artifacts/linux
+          cp src/RogueCollectionQml/RogueCollection artifacts/linux/ 2>/dev/null || true
+          cp src/RogueCollectionQml/rogue-collection artifacts/linux/ 2>/dev/null || true
+          test -f artifacts/linux/RogueCollection || test -f artifacts/linux/rogue-collection
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rogue-collection-linux-x64
+          path: artifacts/linux/
 
   build-flatpak:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-    - name: Install Flatpak and dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y flatpak flatpak-builder
+      - name: Install Flatpak tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
 
-    - name: Add Flathub repository
-      run: |
-        sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+      - name: Add Flathub
+        run: sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 
-    - name: Install Flatpak SDK
-      run: |
-        sudo flatpak install -y flathub org.kde.Platform//6.5 org.kde.Sdk//6.5
+      - name: Install KDE 5.15 SDK (23.08)
+        run: sudo flatpak install -y flathub org.kde.Platform//5.15-23.08 org.kde.Sdk//5.15-23.08
 
-    - name: Create Flatpak manifest
-      run: |
-        cat > io.github.ristiisa.RogueCollection.yml << EOF
-        app-id: io.github.ristiisa.RogueCollection
-        runtime: org.kde.Platform
-        runtime-version: '6.5'
-        sdk: org.kde.Sdk
-        command: rogue-collection
-        finish-args:
-          - --share=ipc
-          - --socket=x11
-          - --socket=wayland
-          - --socket=pulseaudio
-          - --device=dri
-          - --filesystem=home
-        modules:
-          - name: rogue-collection
-            buildsystem: qmake
-            sources:
-              - type: dir
-                path: .
-            build-commands:
-              - cd src/RogueCollectionQml && qmake6 RogueCollection.pro
-              - cd src/RogueCollectionQml && make -j\$(nproc)
-            install-commands:
-              - install -Dm755 src/RogueCollectionQml/rogue-collection /app/bin/rogue-collection
-        EOF
+      - name: Create Flatpak manifest
+        run: |
+          cat > io.github.ristiisa.RogueCollection.yml << 'EOF'
+          app-id: io.github.ristiisa.RogueCollection
+          runtime: org.kde.Platform
+          runtime-version: '5.15-23.08'
+          sdk: org.kde.Sdk
+          command: rogue-collection
+          finish-args:
+            - --share=ipc
+            - --socket=x11
+            - --socket=wayland
+            - --socket=pulseaudio
+            - --device=dri
+            - --filesystem=home
+          modules:
+            - name: rogue-collection
+              buildsystem: simple
+              build-commands:
+                # Build Frontend static lib if Frontend.pro exists anywhere under src/
+                - FE_PRO="$(find src -name Frontend.pro | head -n1)"; if [ -n "$FE_PRO" ]; then mkdir -p build/release && (cd "$(dirname "$FE_PRO")" && qmake Frontend.pro CONFIG+=release "DESTDIR=$PWD/../../build/release" "TARGET=shared-frontend" && make -j${FLATPAK_BUILDER_N_JOBS}); fi
+                - if [ -f build/release/libshared-frontend.a ] && [ ! -f build/release/lib-shared-frontend.a ]; then cp build/release/libshared-frontend.a build/release/lib-shared-frontend.a; fi
+                # Build the application (suppress -Werror=deprecated-declarations)
+                - qmake src/RogueCollectionQml/RogueCollection.pro CONFIG+=release QMAKE_CXXFLAGS+=-Wno-error=deprecated-declarations
+                - make -j${FLATPAK_BUILDER_N_JOBS}
+                - install -Dm755 src/RogueCollectionQml/RogueCollection /app/bin/rogue-collection || install -Dm755 src/RogueCollectionQml/rogue-collection /app/bin/rogue-collection
+              sources:
+                - type: dir
+                  path: .
+          EOF
 
-    - name: Build Flatpak
-      run: |
-        flatpak-builder --repo=repo --force-clean build-dir io.github.ristiisa.RogueCollection.yml
+      - name: Build Flatpak
+        run: flatpak-builder --repo=repo --force-clean build-dir io.github.ristiisa.RogueCollection.yml
 
-    - name: Create Flatpak bundle
-      run: |
-        flatpak build-bundle repo rogue-collection.flatpak io.github.ristiisa.RogueCollection
+      - name: Create Flatpak bundle
+        run: flatpak build-bundle repo rogue-collection.flatpak io.github.ristiisa.RogueCollection
 
-    - name: Upload Flatpak artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: rogue-collection-flatpak
-        path: rogue-collection.flatpak
+      - name: Upload Flatpak artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rogue-collection-flatpak
+          path: rogue-collection.flatpak
 
   build-macos:
-    runs-on: macos-14  # ARM64 runner
+    runs-on: macos-12   # Xcode 14.x image avoids Qt 5.15 path-parse issue
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-    - name: Install Qt
-      uses: jurplel/install-qt-action@v3
-      with:
-        version: '6.5.0'
-        modules: 'qtmultimedia'
+      - name: Select Xcode 14.3.1
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '14.3.1'
 
-    - name: Build project
-      run: |
-        cd src/RogueCollectionQml
-        qmake RogueCollection.pro
-        make -j$(sysctl -n hw.ncpu)
+      - name: Install Qt 5.15.2 (macOS x86_64)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '5.15.2'
+          arch: clang_64
+          archives: 'qtbase qtdeclarative qttools'
 
-    - name: Create macOS app bundle
-      run: |
-        mkdir -p artifacts/macos
-        # Create app bundle structure
-        mkdir -p "artifacts/macos/Rogue Collection.app/Contents/MacOS"
-        mkdir -p "artifacts/macos/Rogue Collection.app/Contents/Resources"
-        
-        # Copy executable
-        cp src/RogueCollectionQml/RogueCollection "artifacts/macos/Rogue Collection.app/Contents/MacOS/"
-        
-        # Create Info.plist
-        cat > "artifacts/macos/Rogue Collection.app/Contents/Info.plist" << EOF
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>CFBundleExecutable</key>
-            <string>RogueCollection</string>
-            <key>CFBundleIdentifier</key>
-            <string>io.github.ristiisa.RogueCollection</string>
-            <key>CFBundleName</key>
-            <string>Rogue Collection</string>
-            <key>CFBundleVersion</key>
-            <string>1.0.0</string>
-            <key>LSMinimumSystemVersion</key>
-            <string>11.0</string>
-        </dict>
-        </plist>
-        EOF
-        
-        # Deploy Qt libraries
-        macdeployqt "artifacts/macos/Rogue Collection.app"
+      - name: Build Frontend static lib (auto-discover)
+        run: |
+          FE_PRO="$(git ls-files 'src/**/Frontend.pro' 'Frontend.pro' | head -n1 || true)"
+          if [ -z "$FE_PRO" ]; then
+            echo "Frontend.pro not found. Skipping lib build."
+          else
+            echo "Found Frontend.pro at: $FE_PRO"
+            mkdir -p build/release
+            ( cd "$(dirname "$FE_PRO")" \
+              && qmake Frontend.pro CONFIG+=release "DESTDIR=$GITHUB_WORKSPACE/build/release" "TARGET=shared-frontend" \
+              && make -j"$(sysctl -n hw.ncpu)" )
+            if [ -f build/release/libshared-frontend.a ] && [ ! -f build/release/lib-shared-frontend.a ]; then
+              cp -f build/release/libshared-frontend.a build/release/lib-shared-frontend.a
+            fi
+            ls -l build/release
+          fi
 
-    - name: Create DMG
-      run: |
-        hdiutil create -volname "Rogue Collection" -srcfolder "artifacts/macos/Rogue Collection.app" -ov -format UDZO "rogue-collection-macos-arm64.dmg"
+      - name: Build app
+        run: |
+          export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          export MACOSX_DEPLOYMENT_TARGET=11.0
+          cd src/RogueCollectionQml
+          qmake RogueCollection.pro CONFIG+=release QMAKE_MAC_SDK=macosx QMAKE_MACOSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET
+          make -j"$(sysctl -n hw.ncpu)"
 
-    - name: Upload macOS artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: rogue-collection-macos-arm64
-        path: rogue-collection-macos-arm64.dmg
+      - name: Create macOS app bundle
+        run: |
+          mkdir -p "artifacts/macos/Rogue Collection.app/Contents/MacOS"
+          mkdir -p "artifacts/macos/Rogue Collection.app/Contents/Resources"
+          cp src/RogueCollectionQml/RogueCollection "artifacts/macos/Rogue Collection.app/Contents/MacOS/" || true
+          cp src/RogueCollectionQml/rogue-collection "artifacts/macos/Rogue Collection.app/Contents/MacOS/RogueCollection" || true
+          /usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string RogueCollection" \
+            -c "Add :CFBundleIdentifier string io.github.ristiisa.RogueCollection" \
+            -c "Add :CFBundleName string Rogue Collection" \
+            -c "Add :CFBundleVersion string 1.0.0" \
+            -c "Add :LSMinimumSystemVersion string 11.0" \
+            "artifacts/macos/Rogue Collection.app/Contents/Info.plist"
+          macdeployqt "artifacts/macos/Rogue Collection.app" -always-overwrite -qmldir=src/RogueCollectionQml
+
+      - name: Create DMG
+        run: hdiutil create -volname "Rogue Collection" -srcfolder "artifacts/macos/Rogue Collection.app" -ov -format UDZO "rogue-collection-macos-x86_64.dmg"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rogue-collection-macos-x86_64
+          path: rogue-collection-macos-x86_64.dmg
 
   create-release:
     if: github.event_name == 'release'
     needs: [build-windows, build-linux, build-flatpak, build-macos]
     runs-on: ubuntu-latest
     steps:
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
 
-    - name: Create release archives
-      run: |
-        cd rogue-collection-windows-x64 && zip -r ../rogue-collection-windows-x64.zip . && cd ..
-        cd rogue-collection-linux-x64 && tar -czf ../rogue-collection-linux-x64.tar.gz . && cd ..
+      - name: Create release archives
+        run: |
+          cd rogue-collection-windows-x64 && zip -r ../rogue-collection-windows-x64.zip . && cd ..
+          cd rogue-collection-linux-x64 && tar -czf ../rogue-collection-linux-x64.tar.gz . && cd ..
 
-    - name: Upload release assets
-      uses: softprops/action-gh-release@v1
-      with:
-        files: |
-          rogue-collection-windows-x64.zip
-          rogue-collection-linux-x64.tar.gz
-          rogue-collection-flatpak/rogue-collection.flatpak
-          rogue-collection-macos-arm64/rogue-collection-macos-arm64.dmg
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            rogue-collection-windows-x64.zip
+            rogue-collection-linux-x64.tar.gz
+            rogue-collection-flatpak/rogue-collection.flatpak
+            rogue-collection-macos-x86_64/rogue-collection-macos-x86_64.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
