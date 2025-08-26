@@ -2,9 +2,9 @@ name: Build Multi-Platform
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, ci-cd ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, ci-cd ]
   release:
     types: [ published ]
 
