@@ -1,0 +1,31 @@
+app-id: io.github.ristiisa.RogueCollection
+runtime: org.kde.Platform
+runtime-version: '6.5'
+sdk: org.kde.Sdk
+command: rogue-collection
+finish-args:
+  - --share=ipc
+  - --socket=x11
+  - --socket=wayland
+  - --socket=pulseaudio
+  - --device=dri
+  - --filesystem=home
+  - --share=network  # In case the app needs network access
+
+modules:
+  - name: rogue-collection
+    buildsystem: qmake
+    sources:
+      - type: dir
+        path: .
+    build-commands:
+      - cd src/RogueCollectionQml && qmake6 RogueCollection.pro
+      - cd src/RogueCollectionQml && make -j$(nproc)
+    install-commands:
+      - install -Dm755 src/RogueCollectionQml/rogue-collection /app/bin/rogue-collection
+      # Install desktop file if you have one
+      # - install -Dm644 rogue-collection.desktop /app/share/applications/io.github.ristiisa.RogueCollection.desktop
+      # Install icon if you have one
+      # - install -Dm644 icon.png /app/share/icons/hicolor/256x256/apps/io.github.ristiisa.RogueCollection.png
+      # Install AppData/MetaInfo file if you have one
+      # - install -Dm644 io.github.ristiisa.RogueCollection.metainfo.xml /app/share/metainfo/io.github.ristiisa.RogueCollection.metainfo.xml

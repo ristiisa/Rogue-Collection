@@ -1,0 +1,221 @@
+name: Build Multi-Platform
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  release:
+    types: [ published ]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Qt
+      uses: jurplel/install-qt-action@v3
+      with:
+        version: '6.5.0'
+        arch: win64_msvc2019_64
+        modules: 'qtmultimedia'
+
+    - name: Setup MSVC
+      uses: microsoft/setup-msbuild@v1.3
+
+    - name: Build project
+      run: |
+        cd src/RogueCollectionQml
+        qmake RogueCollection.pro
+        nmake release
+      shell: cmd
+
+    - name: Create Windows artifact
+      run: |
+        mkdir artifacts/windows
+        copy src\RogueCollectionQml\release\RogueCollection.exe artifacts\windows\
+        # Copy Qt libraries
+        windeployqt artifacts/windows/RogueCollection.exe
+      shell: cmd
+
+    - name: Upload Windows artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: rogue-collection-windows-x64
+        path: artifacts/windows/
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Qt and dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qt6-base-dev qt6-qml-dev qt6-multimedia-dev qmake6 build-essential
+
+    - name: Build project
+      run: |
+        cd src/RogueCollectionQml
+        qmake6 RogueCollection.pro
+        make -j$(nproc)
+
+    - name: Create Linux artifact
+      run: |
+        mkdir -p artifacts/linux
+        cp src/RogueCollectionQml/rogue-collection artifacts/linux/
+
+    - name: Upload Linux artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: rogue-collection-linux-x64
+        path: artifacts/linux/
+
+  build-flatpak:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Flatpak and dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y flatpak flatpak-builder
+
+    - name: Add Flathub repository
+      run: |
+        sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+
+    - name: Install Flatpak SDK
+      run: |
+        sudo flatpak install -y flathub org.kde.Platform//6.5 org.kde.Sdk//6.5
+
+    - name: Create Flatpak manifest
+      run: |
+        cat > io.github.ristiisa.RogueCollection.yml << EOF
+        app-id: io.github.ristiisa.RogueCollection
+        runtime: org.kde.Platform
+        runtime-version: '6.5'
+        sdk: org.kde.Sdk
+        command: rogue-collection
+        finish-args:
+          - --share=ipc
+          - --socket=x11
+          - --socket=wayland
+          - --socket=pulseaudio
+          - --device=dri
+          - --filesystem=home
+        modules:
+          - name: rogue-collection
+            buildsystem: qmake
+            sources:
+              - type: dir
+                path: .
+            build-commands:
+              - cd src/RogueCollectionQml && qmake6 RogueCollection.pro
+              - cd src/RogueCollectionQml && make -j\$(nproc)
+            install-commands:
+              - install -Dm755 src/RogueCollectionQml/rogue-collection /app/bin/rogue-collection
+        EOF
+
+    - name: Build Flatpak
+      run: |
+        flatpak-builder --repo=repo --force-clean build-dir io.github.ristiisa.RogueCollection.yml
+
+    - name: Create Flatpak bundle
+      run: |
+        flatpak build-bundle repo rogue-collection.flatpak io.github.ristiisa.RogueCollection
+
+    - name: Upload Flatpak artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: rogue-collection-flatpak
+        path: rogue-collection.flatpak
+
+  build-macos:
+    runs-on: macos-14  # ARM64 runner
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Qt
+      uses: jurplel/install-qt-action@v3
+      with:
+        version: '6.5.0'
+        modules: 'qtmultimedia'
+
+    - name: Build project
+      run: |
+        cd src/RogueCollectionQml
+        qmake RogueCollection.pro
+        make -j$(sysctl -n hw.ncpu)
+
+    - name: Create macOS app bundle
+      run: |
+        mkdir -p artifacts/macos
+        # Create app bundle structure
+        mkdir -p "artifacts/macos/Rogue Collection.app/Contents/MacOS"
+        mkdir -p "artifacts/macos/Rogue Collection.app/Contents/Resources"
+        
+        # Copy executable
+        cp src/RogueCollectionQml/RogueCollection "artifacts/macos/Rogue Collection.app/Contents/MacOS/"
+        
+        # Create Info.plist
+        cat > "artifacts/macos/Rogue Collection.app/Contents/Info.plist" << EOF
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>CFBundleExecutable</key>
+            <string>RogueCollection</string>
+            <key>CFBundleIdentifier</key>
+            <string>io.github.ristiisa.RogueCollection</string>
+            <key>CFBundleName</key>
+            <string>Rogue Collection</string>
+            <key>CFBundleVersion</key>
+            <string>1.0.0</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>11.0</string>
+        </dict>
+        </plist>
+        EOF
+        
+        # Deploy Qt libraries
+        macdeployqt "artifacts/macos/Rogue Collection.app"
+
+    - name: Create DMG
+      run: |
+        hdiutil create -volname "Rogue Collection" -srcfolder "artifacts/macos/Rogue Collection.app" -ov -format UDZO "rogue-collection-macos-arm64.dmg"
+
+    - name: Upload macOS artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: rogue-collection-macos-arm64
+        path: rogue-collection-macos-arm64.dmg
+
+  create-release:
+    if: github.event_name == 'release'
+    needs: [build-windows, build-linux, build-flatpak, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+
+    - name: Create release archives
+      run: |
+        cd rogue-collection-windows-x64 && zip -r ../rogue-collection-windows-x64.zip . && cd ..
+        cd rogue-collection-linux-x64 && tar -czf ../rogue-collection-linux-x64.tar.gz . && cd ..
+
+    - name: Upload release assets
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          rogue-collection-windows-x64.zip
+          rogue-collection-linux-x64.tar.gz
+          rogue-collection-flatpak/rogue-collection.flatpak
+          rogue-collection-macos-arm64/rogue-collection-macos-arm64.dmg
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
